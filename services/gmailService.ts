@@ -17,17 +17,19 @@ export class GmailService {
     return typeof window !== 'undefined' && !!(window as any).google?.accounts?.oauth2;
   }
 
-  init(onTokenReceived: (token: string) => void): boolean {
-    if (!this.isLoaded()) {
-      console.warn("Google Identity Services script not yet loaded.");
-      return false;
-    }
+  init(onTokenReceived: (token: string) => void, onError: (err: any) => void): boolean {
+    if (!this.isLoaded()) return false;
     
     try {
       this.client = (window as any).google.accounts.oauth2.initTokenClient({
-        client_id: this.clientId,
+        client_id: this.clientId.trim(),
         scope: SCOPES,
         callback: (response: any) => {
+          if (response.error) {
+            console.error("GSI Response Error:", response);
+            onError(response);
+            return;
+          }
           if (response.access_token) {
             this.accessToken = response.access_token;
             onTokenReceived(response.access_token);
@@ -36,27 +38,36 @@ export class GmailService {
       });
       return true;
     } catch (e) {
-      console.error("Failed to initialize Gmail Client", e);
+      console.error("GSI Init Exception:", e);
+      onError(e);
       return false;
     }
   }
 
   requestToken() {
     if (this.client) {
-      this.client.requestAccessToken();
-    } else {
-      console.error("Gmail client not initialized. Call init() first.");
+      try {
+        // Using 'select_account' can help if multiple accounts are logged in
+        this.client.requestAccessToken({ prompt: 'select_account' });
+      } catch (e) {
+        console.error("Token request failed", e);
+      }
     }
   }
 
   private safeDecode(str: string): string {
     try {
-      // Handle URL-safe base64 and potential padding issues
+      // Gmail uses URL-safe base64
       const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-      return decodeURIComponent(escape(atob(base64)));
+      const binStr = atob(base64);
+      const bytes = new Uint8Array(binStr.length);
+      for (let i = 0; i < binStr.length; i++) {
+        bytes[i] = binStr.charCodeAt(i);
+      }
+      return new TextDecoder().decode(bytes);
     } catch (e) {
-      console.warn("Base64 decode failed, falling back to snippet", e);
-      return "";
+      console.warn("Base64 decode failed, falling back to raw string");
+      return str;
     }
   }
 
@@ -65,14 +76,15 @@ export class GmailService {
 
     const listRes = await fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=15`,
-      {
-        headers: { Authorization: `Bearer ${this.accessToken}` },
-      }
+      { headers: { Authorization: `Bearer ${this.accessToken}` } }
     );
     
-    if (!listRes.ok) throw new Error(`Gmail API error: ${listRes.statusText}`);
-    const listData = await listRes.json();
+    if (!listRes.ok) {
+      const errorData = await listRes.json().catch(() => ({}));
+      throw new Error(errorData.error?.message || `Gmail API error: ${listRes.status}`);
+    }
     
+    const listData = await listRes.json();
     if (!listData.messages) return [];
 
     const messages = await Promise.all(
@@ -80,35 +92,26 @@ export class GmailService {
         try {
           const detailRes = await fetch(
             `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}`,
-            {
-              headers: { Authorization: `Bearer ${this.accessToken}` },
-            }
+            { headers: { Authorization: `Bearer ${this.accessToken}` } }
           );
           const detailData = await detailRes.json();
           
           let body = detailData.snippet;
-          if (detailData.payload) {
-            const getBody = (payload: any): string => {
-              if (payload.body?.data) return this.safeDecode(payload.body.data);
-              if (payload.parts) {
-                for (const part of payload.parts) {
-                  const b = getBody(part);
-                  if (b) return b;
-                }
+          const extractBody = (payload: any): string => {
+            if (payload.body?.data) return this.safeDecode(payload.body.data);
+            if (payload.parts) {
+              for (const part of payload.parts) {
+                const b = extractBody(part);
+                if (b) return b;
               }
-              return "";
-            };
-            const extracted = getBody(detailData.payload);
-            if (extracted) body = extracted;
-          }
-
-          return {
-            id: msg.id,
-            snippet: detailData.snippet,
-            body: body
+            }
+            return "";
           };
+
+          const foundBody = extractBody(detailData.payload);
+          return { id: msg.id, snippet: detailData.snippet, body: foundBody || detailData.snippet };
         } catch (e) {
-          console.error(`Error fetching message ${msg.id}`, e);
+          console.error(`Failed to fetch message details for ${msg.id}`, e);
           return null;
         }
       })
