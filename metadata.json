@@ -1,0 +1,5 @@
+{
+  "name": "HDFC InstaAlert Expense Tracker",
+  "description": "A smart expense dashboard that parses HDFC Bank InstaAlert emails using Gemini AI to categorize and visualize your spending habits automatically.",
+  "requestFramePermissions": []
+}
