@@ -2,8 +2,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Transaction, ExpenseCategory } from "../types.ts";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 const transactionSchema = {
   type: Type.OBJECT,
   properties: {
@@ -36,6 +34,14 @@ const transactionSchema = {
 };
 
 export const parseEmailContent = async (emailText: string): Promise<Transaction | null> => {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    console.error("Gemini API Key is missing. Ensure process.env.API_KEY is configured.");
+    return null;
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
